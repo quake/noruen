@@ -5,3 +5,7 @@ gemspec
 
 gem "rake", "~> 12.0"
 gem "minitest", "~> 5.0"
+gem "ckb", github: "quake/ckb-ruby-sdk"
+gem "canis"
+gem "money-tree"
+gem "bip_mnemonic"

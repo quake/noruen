@@ -1,0 +1,147 @@
+#!/usr/bin/env ruby
+require 'canis/core/util/app'
+require 'canis/core/widgets/listbox'
+require 'canis/core/widgets/tabular'
+require 'canis/core/widgets/scrollbar'
+require "bip_mnemonic"
+require "money-tree/support"
+require "money-tree/node"
+require "money-tree/key"
+require 'ckb'
+
+$rpc = CKB::Config.instance.rpc
+$private_key = "0x63d86723e08f0f813a36ce6aa123bb2289d90680ae1e99d4de8cdb334553f24d"
+$lock_hash = "0xc219351b150b900e50a7039f1e448b844110927e5fd9bd30425806cb8ddff1fd"
+$wallet = CKB::Wallet.new("ckt1qyqywrwdchjyqeysjegpzw38fvandtktdhrs0zaxl4")
+
+class Wallet
+  def initialize(seed)
+    @master = MoneyTree::Master.new(seed_hex: seed)
+  end
+
+  def receiving_node(index)
+    @master.node_for_path("m/44'/309'/0'/0/#{index}")
+  end
+
+  def change_node(index)
+    @master.node_for_path("m/44'/309'/0'/1/#{index}")
+  end
+end
+
+class String
+  def fmt_ckb_capacity
+    r = self.to_i(16).to_s
+    "#{r[0..-8].reverse.scan(/\d{3}|.+/).join(",").reverse}.#{r[-8..-1]}"
+  end
+
+  def fmt_timestamp
+    Time.at(self.to_i(16) / 1000).strftime("%Y-%m-%d %H:%M")
+  end
+end
+
+def load_wallet
+  folder = File.expand_path("~/.noruen")
+  if File.directory?(folder)
+    i = Dir.entries(folder).map(&:to_i).max
+    wallet_file = File.join(folder, "#{i}.wallet")
+    if File.exist?(wallet_file) && (seed = File.read(wallet_file)) != nil
+      @wallet = Wallet.new(seed)
+    end
+  end
+end
+
+def save_wallet(seed)
+  folder = File.expand_path("~/.noruen")
+  Dir.mkdir(folder) unless File.directory?(folder)
+  i = Dir.entries(folder).map(&:to_i).max
+  File.write(File.join(folder, "#{i + 1}.wallet"), seed)
+end
+
+def create_or_import_wallet
+  mb = MessageBox.new :height => 20, :width => 60, :buttons => ["&New", "&Import"] do
+    title "Create new wallet or import by mnemonic?"
+    button_type :custom
+  end
+  mb.command do |eve|
+    if eve.event == 0
+      tp = MessageBox.new height: 10, width: 100 do
+        title "Your new wallet seed has been generated"
+        add Label.new row: 3, col: 5, text: BipMnemonic.to_mnemonic({})
+        button_type :ok_cancel
+      end
+      tp.command do |eve|
+        if eve.event == 0
+          import_wallet
+          throw(:close, 0) if @wallet
+        else
+          throw(:close, 1)
+        end
+      end
+      tp.run
+      throw(:close, 0) if @wallet
+    else
+      import_wallet
+      throw(:close, 1) if @wallet
+    end
+  end
+  mb.run
+end
+
+def import_wallet
+  words = get_string("Input your wallet seed:", :width => 100, title: 'Import', field_config: {width: 90})
+  if words && words.strip.size > 10
+    seed = BipMnemonic.to_seed(mnemonic: words)
+    save_wallet(seed)
+    @wallet = Wallet.new(seed)
+  end
+end
+
+def wallet_view
+  stack margin_top: 1, width_pc: 10 do
+    lb = listbox list: ["Wallets","Send","Receive","History","UDT"] , title: "[ Menu ]"
+    lb.bind :PRESS do |e|
+
+    end
+  end
+
+  stack margin_top: 1, width_pc: 90, height_pc: 100 do
+    textview name: "main", set_content: "#{$rpc.get_capacity_by_lock_hash($lock_hash)[:capacity].fmt_ckb_capacity} CKB", title: '[ Capacity ]', height: 3
+
+    t = Tabular.new do
+      self.headings = 'Date',  'Type', 'Amount', 'Status', ''
+      $rpc.get_transactions_by_lock_hash($lock_hash, 0, 50, true).each do |r|
+        timestamp = $rpc.get_header_by_number(r[:created_by][:block_number])[:timestamp]
+        capacity = $rpc.get_transaction(r[:created_by][:tx_hash])[:transaction][:outputs][r[:created_by][:index].to_i(16)][:capacity]
+        add_row [timestamp.fmt_timestamp, "Receive", "#{capacity.fmt_ckb_capacity} CKB", "Success", ""]
+
+        if consumed_by = r[:consumed_by]
+          timestamp = $rpc.get_header_by_number(consumed_by[:block_number])[:timestamp]
+          out_point = $rpc.get_transaction(consumed_by[:tx_hash])[:transaction][:inputs][consumed_by[:index].to_i(16)]
+          capacity = $rpc.get_transaction(out_point[:previous_output][:tx_hash])[:transaction][:outputs][out_point[:previous_output][:index].to_i(16)][:capacity]
+          add_row [timestamp.fmt_timestamp, "Send", "#{capacity.fmt_ckb_capacity} CKB", "Success", ""]
+        end
+      end
+    end
+
+    lb = textview set_content: t.render, title: '[ Transactions ]', height_pc: 90
+    lb.bind(:PRESS) do |tae|
+      alert "Pressed list on line #{tae.current_index}  #{tae.word_under_cursor(nil, nil, "|")}  "
+    end
+    Scrollbar.new @form, parent: lb
+  end
+end
+
+App.new do
+  @header = app_header "Noruen 0.0.1", text_center: "A \"native\" CKB wallet in 999 lines of code", text_right: "Help", color: :black, bgcolor: :white
+  @status_line = status_line
+  @status_line.command {}
+
+  flow width: FFI::NCurses.COLS , height: FFI::NCurses.LINES - 2 do
+    if wallet = load_wallet
+      wallet_view
+    else
+      create_or_import_wallet
+      wallet_view
+    end
+  end
+end

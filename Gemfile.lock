@@ -1,3 +1,13 @@
+GIT
+  remote: https://github.com/quake/ckb-ruby-sdk.git
+  revision: 53a4e13c3aebc977d7285551d977a41181f6b5ae
+  specs:
+    ckb (0.1.0)
+      bech32 (~> 1.0)
+      bitcoin-secp256k1 (~> 0.5.2)
+      net-http-persistent (~> 3.0.0)
+      rbnacl (~> 7.0)
+
 PATH
   remote: .
   specs:
@@ -6,14 +16,37 @@ PATH
 GEM
   remote: https://rubygems.org/
   specs:
+    bech32 (1.0.5)
+    bip_mnemonic (0.0.4)
+    bitcoin-secp256k1 (0.5.2)
+      ffi (>= 1.9.25)
+    canis (0.0.13)
+      ffi-ncurses (>= 0.4.0)
+    connection_pool (2.2.2)
+    ffi (1.12.2)
+    ffi-locale (1.0.1)
+      ffi (>= 1.0.9)
+    ffi-ncurses (0.4.0)
+      ffi (>= 1.0.9)
+      ffi-locale (>= 1.0.0)
     minitest (5.10.3)
+    money-tree (0.10.0)
+      ffi
+    net-http-persistent (3.0.1)
+      connection_pool (~> 2.2)
     rake (12.3.0)
+    rbnacl (7.1.1)
+      ffi
 
 PLATFORMS
   ruby
 
 DEPENDENCIES
+  bip_mnemonic
+  canis
+  ckb!
   minitest (~> 5.0)
+  money-tree
   noruen!
   rake (~> 12.0)
 
