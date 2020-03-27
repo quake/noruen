@@ -1,0 +1,3 @@
+[submodule "submodule/ckb-ruby-sdk"]
+	path = submodule/ckb-ruby-sdk
+	url = git@github.com:quake/ckb-ruby-sdk.git
