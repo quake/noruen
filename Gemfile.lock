@@ -32,6 +32,8 @@ GEM
     minitest (5.10.3)
     money-tree (0.10.0)
       ffi
+    ncumbra (0.1.4)
+      ffi-ncurses (>= 0.4.0)
     net-http-persistent (3.0.1)
       connection_pool (~> 2.2)
     rake (12.3.0)
@@ -47,6 +49,7 @@ DEPENDENCIES
   ckb!
   minitest (~> 5.0)
   money-tree
+  ncumbra
   noruen!
   rake (~> 12.0)
 
