@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 require 'umbra'
 require 'umbra/label'
-require 'umbra/tabular'
+require 'umbra/table'
 require 'umbra/listbox'
 require 'umbra/textbox'
 require 'umbra/box'
@@ -16,9 +16,7 @@ require 'ckb'
 require 'rqrcode'
 
 $rpc = CKB::Config.instance.rpc
-$private_key = "0x63d86723e08f0f813a36ce6aa123bb2289d90680ae1e99d4de8cdb334553f24d"
-$lock_hash = "0xc219351b150b900e50a7039f1e448b844110927e5fd9bd30425806cb8ddff1fd"
-$wallet = CKB::Wallet.new("ckt1qyqywrwdchjyqeysjegpzw38fvandtktdhrs0zaxl4")
+LEVEL = 10
 
 class Wallet
   def initialize(seed)
@@ -37,7 +35,7 @@ class Wallet
     node = receiving_node(level)
     CKB::Types::Script.new(
       code_hash: CKB::Types::Script::SECP256K1_BLAKE160_SIGHASH_ALL_TYPE_HASH,
-      args: "0x#{node.public_key.key[0, 40]}",
+      args: CKB::Blake2b.digest(node.public_key.key.from_hex).to_hex[0, 42],
       hash_type: "type"
     )
   end
@@ -46,31 +44,108 @@ class Wallet
     node = change_node(level)
     CKB::Types::Script.new(
       code_hash: CKB::Types::Script::SECP256K1_BLAKE160_SIGHASH_ALL_TYPE_HASH,
-      args: "0x#{node.public_key.key[0, 40]}",
+      args: CKB::Blake2b.digest(node.public_key.key.from_hex).to_hex[0, 42],
       hash_type: "type"
     )
   end
 
-  def index_lock_hashes(level = 10)
-    (0..level).map do |l|
+  def lock_hashes
+    (0..LEVEL).map do |l|
       self.receiving_script(l).compute_hash.to_hex
-    end +
-    (0..level).map do |l|
+    end + (0..LEVEL).map do |l|
       self.change_script(l).compute_hash.to_hex
     end
   end
 
+  def addresses
+    (0..LEVEL).map do |l|
+      CKB::Address.generate(self.receiving_script(l), CKB::Address::HRP_TESTNET)
+    end + (0..LEVEL).map do |l|
+      CKB::Address.generate(self.change_script(l), CKB::Address::HRP_TESTNET)
+    end
+  end
+
+  def private_keys
+    (0..LEVEL).map do |l|
+      "0x#{self.receiving_node(l).private_key.key}".from_hex
+    end + (0..LEVEL).map do |l|
+      "0x#{self.change_node(l).private_key.key}".from_hex
+    end
+  end
+
+  def init_index
+    self.lock_hashes.each do |lock_hash|
+      $rpc.index_lock_hash(lock_hash, 0)
+    end
+  end
+
+  def index_progress
+    @index_progress_tip_number ||= $rpc.get_tip_block_number.to_i(16)
+    lock_hashes = self.lock_hashes
+    total = @index_progress_tip_number * lock_hashes.size
+    current = 0
+    $rpc.get_lock_hash_index_states.each do |state|
+      if lock_hashes.include?(state[:lock_hash])
+        current += state[:block_number].to_i(16)
+      end
+    end
+    current.to_f / total
+  end
+
+  def capacity
+    self.lock_hashes.inject(0) do |r, lock_hash|
+      r + $rpc.get_capacity_by_lock_hash(lock_hash)[:capacity].to_i(16)
+    end
+  end
+
+  def transactions
+    result = []
+    self.lock_hashes.map do |lock_hash|
+      $rpc.get_transactions_by_lock_hash(lock_hash, 0, 5, true).each do |r|
+        timestamp = $rpc.get_header_by_number(r[:created_by][:block_number])[:timestamp]
+        capacity = $rpc.get_transaction(r[:created_by][:tx_hash])[:transaction][:outputs][r[:created_by][:index].to_i(16)][:capacity].to_i(16)
+        result << [timestamp.fmt_timestamp, "Receive", "#{capacity.fmt_ckb_capacity} CKB", "Success", r[:created_by][:tx_hash]]
+
+        if consumed_by = r[:consumed_by]
+          timestamp = $rpc.get_header_by_number(consumed_by[:block_number])[:timestamp]
+          out_point = $rpc.get_transaction(consumed_by[:tx_hash])[:transaction][:inputs][consumed_by[:index].to_i(16)]
+          capacity = $rpc.get_transaction(out_point[:previous_output][:tx_hash])[:transaction][:outputs][out_point[:previous_output][:index].to_i(16)][:capacity].to_i(16)
+          result << [timestamp.fmt_timestamp, "Send", "#{capacity.fmt_ckb_capacity} CKB", "Success", consumed_by[:tx_hash]]
+        end
+      end
+    end
+    result
+  end
+
+  def transfer(to_address, capacity)
+    w = CKB::Wallet.new(self.addresses, :default_indexer)
+    tx_builder = w.advance_build({
+        to_address => {capacity: (capacity * 1_0000_0000).to_i},
+        self.pick_change_address => {capacity: 0}
+    })
+    tx = w.advance_sign(tx_builder, self.private_keys)
+    alert $rpc.send_transaction(tx.as_json)
+  end
+
+  def pick_receiving_address
+    @picked_receiving_address ||= CKB::Address.generate(receiving_script((0..LEVEL).to_a.sample), CKB::Address::HRP_TESTNET)
+  end
+
   def pick_change_address
-    @receiving_address ||= CKB::Address.generate(change_script((0..10).to_a.sample))
+    @picked_change_address ||= CKB::Address.generate(change_script((0..LEVEL).to_a.sample), CKB::Address::HRP_TESTNET)
   end
 end
 
-class String
+class Integer
   def fmt_ckb_capacity
-    r = self.to_i(16).to_s
-    "#{r[0..-8].reverse.scan(/\d{3}|.+/).join(",").reverse}.#{r[-8..-1]}"
+    return "0" if self == 0
+    r = self.to_s
+    "#{r[0..-9].reverse.scan(/\d{3}|.+/).join(",").reverse}.#{r[-8..-1]}"
   end
 
+end
+
+class String
   def fmt_timestamp
     Time.at(self.to_i(16) / 1000).strftime("%Y-%m-%d %H:%M")
   end
@@ -120,6 +195,8 @@ def import_wallet
     seed = BipMnemonic.to_seed(mnemonic: f_seed.text.strip)
     save_wallet(seed)
     @wallet = Wallet.new(seed)
+    @wallet.init_index
+    @wallet
   end
 end
 
@@ -143,32 +220,31 @@ end
 MENU_ROW = 2
 MENU_COL = 0
 MENU_WIDTH = 15
-MENU_HEIGHT = 11
+MENU_HEIGHT = 9
 
 def draw_wallet_view(form)
-  l = Label.new text: "Capacity: #{$rpc.get_capacity_by_lock_hash($lock_hash)[:capacity].fmt_ckb_capacity} CKB"
+  l = Label.new text: "Capacity: #{@wallet.capacity.fmt_ckb_capacity} CKB"
 
-  t = Tabular.new do |t|
-    t.headings = 'Date',  'Type', 'Amount', 'Status', ''
-    $rpc.get_transactions_by_lock_hash($lock_hash, 0, 50, true).each do |r|
-      timestamp = $rpc.get_header_by_number(r[:created_by][:block_number])[:timestamp]
-      capacity = $rpc.get_transaction(r[:created_by][:tx_hash])[:transaction][:outputs][r[:created_by][:index].to_i(16)][:capacity]
-      t.add_row [timestamp.fmt_timestamp, "Receive", "#{capacity.fmt_ckb_capacity} CKB", "Success", ""]
-
-      if consumed_by = r[:consumed_by]
-        timestamp = $rpc.get_header_by_number(consumed_by[:block_number])[:timestamp]
-        out_point = $rpc.get_transaction(consumed_by[:tx_hash])[:transaction][:inputs][consumed_by[:index].to_i(16)]
-        capacity = $rpc.get_transaction(out_point[:previous_output][:tx_hash])[:transaction][:outputs][out_point[:previous_output][:index].to_i(16)][:capacity]
-        t.add_row [timestamp.fmt_timestamp, "Send", "#{capacity.fmt_ckb_capacity} CKB", "Success", ""]
-      end
+  t = Table.new columns: ['Date',  'Type', 'Amount', 'Status', 'Tx']
+  txs = @wallet.transactions
+  if txs.size > 0
+    txs.each do |r|
+      t << r
+    end
+  else
+    t << ['No Transactions', '', '', '', '']
+  end
+  t.column_align(2, :right)
+  t.bind_event(:PRESS) do |obj|
+    if obj.current_index > 0
+      `open https://explorer.nervos.org/aggron/transaction/#{txs[obj.current_index - 1].last}`
     end
   end
-  lb = Listbox.new list: t.render
 
   view = Box.new title: 'Wallet', row: MENU_ROW, col: MENU_COL + MENU_WIDTH + 1, width: FFI::NCurses.COLS - MENU_WIDTH - 1, height: FFI::NCurses.LINES - MENU_ROW - 1
-  view.stack l, lb
-  form.add_widget view, l, lb
-  [view, l, lb]
+  view.stack l, t
+  form.add_widget view, l, t
+  [view, l, t]
 end
 
 def draw_send_view(form)
@@ -196,7 +272,7 @@ def draw_send_view(form)
   btn_send.command do
     if address.strip != "" && capacity > 0.01
       if confirm "Send #{capacity.to_s} CKB to #{address} ?"
-
+        @wallet.transfer(address, capacity)
       end
     end
   end
@@ -205,7 +281,7 @@ def draw_send_view(form)
 end
 
 def draw_receive_view(form)
-  lf_address = Label.new text: "Address: #{@wallet.pick_change_address}"
+  lf_address = Label.new text: "Address: #{@wallet.pick_receiving_address}"
   view = Box.new title: 'Receive', row: MENU_ROW, col: MENU_COL + MENU_WIDTH + 1, width: FFI::NCurses.COLS - MENU_WIDTH - 1, height: FFI::NCurses.LINES - MENU_ROW - 1
   view.stack lf_address
   form.add_widget view, lf_address
@@ -213,7 +289,7 @@ def draw_receive_view(form)
 end
 
 def draw_qr_code(win)
-  qr = RQRCode::QRCode.new(@wallet.pick_change_address, size: 3, level: :l)
+  qr = RQRCode::QRCode.new(@wallet.pick_receiving_address, size: 3, level: :l)
 
   qr.qrcode.modules.each_with_index do |row, ri|
     row.each_with_index do |col, ci|
@@ -222,7 +298,40 @@ def draw_qr_code(win)
   end
 end
 
+def draw_addresses_view(form)
+  t = Table.new columns: ['Type', 'Address', 'Balance']
+  rows = []
+  (0..LEVEL).each do |l|
+    script = @wallet.receiving_script(l)
+    capacity = $rpc.get_capacity_by_lock_hash(script.compute_hash.to_hex)[:capacity].to_i(16)
+    rows << ['Receiving', CKB::Address.generate(script, CKB::Address::HRP_TESTNET), "#{capacity.fmt_ckb_capacity} CKB"]
+  end
+
+  (0..LEVEL).each do |l|
+    script = @wallet.change_script(l)
+    capacity = $rpc.get_capacity_by_lock_hash(script.compute_hash.to_hex)[:capacity].to_i(16)
+    rows << ['Change', CKB::Address.generate(script, CKB::Address::HRP_TESTNET), "#{capacity.fmt_ckb_capacity} CKB"]
+  end
+
+  rows.each do |r|
+    t << r
+  end
+
+  t.column_align(2, :right)
+  t.bind_event(:PRESS) do |obj|
+    if obj.current_index > 0
+      `open https://explorer.nervos.org/aggron/address/#{rows[obj.current_index - 1][1]}`
+    end
+  end
+
+  view = Box.new title: 'Addresses', row: MENU_ROW, col: MENU_COL + MENU_WIDTH + 1, width: FFI::NCurses.COLS - MENU_WIDTH - 1, height: FFI::NCurses.LINES - MENU_ROW - 1
+  view.stack t
+  form.add_widget view, t
+  [view, t]
+end
+
 def toogle_view(win, views, i)
+  return if @selected_view == i
   # clear
   (0..FFI::NCurses.LINES - MENU_ROW - 2).each do |i|
     win.printstring(MENU_ROW + i, MENU_COL + MENU_WIDTH + 1, " " * (FFI::NCurses.COLS - MENU_WIDTH - 1))
@@ -230,19 +339,24 @@ def toogle_view(win, views, i)
   views.each_with_index do |view, index|
     view.each{|w| w.visible = i == index}
   end
+  @selected_view = i
 end
 
 def main_view(form, win)
+  while (progress = @wallet.index_progress) < 1
+    alert "Progress: #{'%.2f' % progress}%", title: "Waiting for initial sync"
+  end
+
   box_menu = Box.new row: MENU_ROW, col: MENU_COL, width: MENU_WIDTH, height: MENU_HEIGHT
   btn_wallet = Button.new(text: 'Wallets', height: 1)
   btn_send = Button.new(text: 'Send', height: 1)
   btn_receive = Button.new(text: 'Receive', height: 1)
-  btn_history = Button.new(text: 'History', height: 1)
-  btn_udt = Button.new(text: 'UDT', height: 1)
-  box_menu.stack btn_wallet, btn_send, btn_receive, btn_history, btn_udt
-  form.add_widget box_menu, btn_wallet, btn_send, btn_receive, btn_history, btn_udt
+  btn_addresses = Button.new(text: 'Addresses', height: 1)
+  box_menu.stack btn_wallet, btn_send, btn_receive, btn_addresses
+  form.add_widget box_menu, btn_wallet, btn_send, btn_receive, btn_addresses
 
-  views = [draw_wallet_view(form), draw_send_view(form), draw_receive_view(form)]
+  views = [draw_wallet_view(form), draw_send_view(form), draw_receive_view(form), draw_addresses_view(form)]
+  @selected_view = -1
   toogle_view(win, views, 0)
 
   btn_wallet.command do
@@ -256,6 +370,10 @@ def main_view(form, win)
   btn_receive.command do
     toogle_view(win, views, 2)
     draw_qr_code(win)
+  end
+
+  btn_addresses.command do
+    toogle_view(win, views, 3)
   end
 
   form.pack
