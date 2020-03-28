@@ -20,8 +20,7 @@ GEM
     bip_mnemonic (0.0.4)
     bitcoin-secp256k1 (0.5.2)
       ffi (>= 1.9.25)
-    canis (0.0.13)
-      ffi-ncurses (>= 0.4.0)
+    chunky_png (1.3.11)
     connection_pool (2.2.2)
     ffi (1.12.2)
     ffi-locale (1.0.1)
@@ -39,19 +38,23 @@ GEM
     rake (12.3.0)
     rbnacl (7.1.1)
       ffi
+    rqrcode (1.1.2)
+      chunky_png (~> 1.0)
+      rqrcode_core (~> 0.1)
+    rqrcode_core (0.1.2)
 
 PLATFORMS
   ruby
 
 DEPENDENCIES
   bip_mnemonic
-  canis
   ckb!
   minitest (~> 5.0)
   money-tree
   ncumbra
   noruen!
   rake (~> 12.0)
+  rqrcode
 
 BUNDLED WITH
    2.1.4
